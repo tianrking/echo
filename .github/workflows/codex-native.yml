@@ -5,25 +5,27 @@ on:
 permissions:
   contents: read
 jobs:
-  red:
+  prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
-          ref: 0feaae95161aad9f988bd1c5de375f9a0e92c500
+          ref: 1534a33a74443cb5fc9e3d3c9aa57eef1fe8f5f5
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
           go-version: '1.26'
           cache: true
-      - name: Original production regression
+      - name: Replay final tests on original production
         shell: bash
         run: |
           mkdir -p evidence
           git rev-parse HEAD > evidence/source-sha.txt
           sha256sum group.go group_notfound_test.go > evidence/source-sha256.txt
           go version > evidence/go-version.txt
+          git show 99c395d846e079d4cffd29de9298d1dd829e8b04:group.go > group.go
+          sha256sum group.go > evidence/original-production-sha256.txt
           set +e
           go test -json -count=1 -run '^TestGroupUse' . 2>&1 | tee evidence/red.jsonl
           result=${PIPESTATUS[0]}
@@ -46,19 +48,32 @@ jobs:
               'TestGroupUseRejectsNotFoundRegistrationWithoutReplacingHandler': 'fail',
               'TestGroupUseNotFoundWithAutoRegistrationDisabled': 'pass',
               'TestGroupUseNotFoundOverHTTP': 'fail',
+              'TestGroupUseDoesNotRestoreRemovedNotFoundHandler': 'pass',
           }
           assert all(results.get(k) == v for k, v in expected.items()), results
           assert not any(v == 'skip' for v in results.values()), results
           json.dump(results, open('evidence/test-results.json', 'w'), indent=2)
           PY
-      - name: Format test using native gofmt
+      - name: Minimum correction focused GREEN
         run: |
-          gofmt -w group_notfound_test.go
+          git restore --source=HEAD -- group.go
+          sha256sum -c evidence/source-sha256.txt
+          set +e
+          go test -json -count=1 -run '^TestGroupUse' . 2>&1 | tee evidence/green.jsonl
+          result=${PIPESTATUS[0]}
+          set -e
+          echo "$result" > evidence/green-raw-exit.txt
+          test "$result" -eq 0
+          sha256sum -c evidence/source-sha256.txt
+      - name: Format source using native gofmt
+        run: |
+          gofmt -w group.go group_notfound_test.go
           git diff > evidence/format.diff
+          cp group.go evidence/group.go
           cp group_notfound_test.go evidence/group_notfound_test.go
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: echo-native-red
+          name: echo-native-prepare
           path: evidence/
           if-no-files-found: error
