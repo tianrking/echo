@@ -1,0 +1,64 @@
+name: Echo native evidence
+on:
+  push:
+    branches: [codex/echo-native-validation]
+permissions:
+  contents: read
+jobs:
+  red:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: 0feaae95161aad9f988bd1c5de375f9a0e92c500
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Original production regression
+        shell: bash
+        run: |
+          mkdir -p evidence
+          git rev-parse HEAD > evidence/source-sha.txt
+          sha256sum group.go group_notfound_test.go > evidence/source-sha256.txt
+          go version > evidence/go-version.txt
+          set +e
+          go test -json -count=1 -run '^TestGroupUse' . 2>&1 | tee evidence/red.jsonl
+          result=${PIPESTATUS[0]}
+          set -e
+          echo "$result" > evidence/raw-exit.txt
+          test "$result" -eq 1
+          python3 - <<'PY'
+          import json
+          events = []
+          for line in open('evidence/red.jsonl'):
+              try:
+                  events.append(json.loads(line))
+              except json.JSONDecodeError:
+                  pass
+          results = {e['Test']: e['Action'] for e in events if e.get('Test') and e['Action'] in ('pass', 'fail', 'skip')}
+          expected = {
+              'TestGroupUsePreservesNotFoundHandler': 'fail',
+              'TestGroupUsePreservesNotFoundWithoutRouterOverwrite': 'fail',
+              'TestGroupUsePreservesNotFoundMiddlewareSnapshot': 'fail',
+              'TestGroupUseRejectsNotFoundRegistrationWithoutReplacingHandler': 'fail',
+              'TestGroupUseNotFoundWithAutoRegistrationDisabled': 'pass',
+              'TestGroupUseNotFoundOverHTTP': 'fail',
+          }
+          assert all(results.get(k) == v for k, v in expected.items()), results
+          assert not any(v == 'skip' for v in results.values()), results
+          json.dump(results, open('evidence/test-results.json', 'w'), indent=2)
+          PY
+      - name: Format test using native gofmt
+        run: |
+          gofmt -w group_notfound_test.go
+          git diff > evidence/format.diff
+          cp group_notfound_test.go evidence/group_notfound_test.go
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: echo-native-red
+          path: evidence/
+          if-no-files-found: error
